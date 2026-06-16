@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use crate::error::Result as MeshResult;
 use crate::types::DeviceStatus;
 
+
+pub mod mock;
 #[async_trait]
 pub trait MeshDevice {
     fn device_type(&self) -> &str;
