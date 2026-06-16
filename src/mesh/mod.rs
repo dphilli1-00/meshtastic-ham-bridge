@@ -10,6 +10,7 @@ pub trait MeshDevice {
     async fn send_packet(&self, data: &[u8]) -> MeshResult<()>;
     async fn status(&self) -> MeshResult<DeviceStatus>;
     async fn disconnect(&self) -> MeshResult<()>;
+    async fn recv_raw_packet(&self) -> MeshResult<Vec<u8>>;
 }
 
 
