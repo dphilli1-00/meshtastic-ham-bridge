@@ -23,17 +23,21 @@ type BridgeConfig struct {
 // MeshConfig — type field selects which sub-config is used.
 type MeshConfig struct {
 	Type       string `toml:"type"`        // "meshtastic" or "meshcore"
-	Port       string `toml:"port"`        // serial port; empty = discover
-	BLEName    string `toml:"ble_name"`    // BLE device name substring
+	Port       string `toml:"port"`        // serial port; empty = auto-discover
+	BLEAddress string `toml:"ble_address"` // BLE MAC e.g. "C0:C2:24:70:D8:15"; takes priority over serial
+	BLEName    string `toml:"ble_name"`    // BLE device name substring (informational)
 	BaudRate   int    `toml:"baud_rate"`   // default 115200
 }
 
 // HamConfig — type field selects which sub-config is used.
 type HamConfig struct {
-	Type        string `toml:"type"`         // "direwolf", "audio", "ardop"
-	Host        string `toml:"host"`         // direwolf/ardop host
-	Port        int    `toml:"port"`         // direwolf/ardop port
+	Type        string `toml:"type"`         // "direwolf", "audio", "audio+rigctl", "ardop"
+	Host        string `toml:"host"`         // direwolf/ardop/rigctld host
+	Port        int    `toml:"port"`         // direwolf/ardop/rigctld port
 	AudioDevice string `toml:"audio_device"` // substring match; empty = default
+	// rigctld — used when type is "audio+rigctl"
+	RigctlHost string `toml:"rigctl_host"`  // default 127.0.0.1
+	RigctlPort int    `toml:"rigctl_port"`  // default 4532
 }
 
 // Load reads config using the standard search order:

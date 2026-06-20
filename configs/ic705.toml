@@ -1,0 +1,22 @@
+# IC-705 config example
+# 
+# Setup:
+#   1. Connect IC-705 via USB
+#   2. Start rigctld:
+#        rigctld -m 3085 -r /dev/ttyUSB0 -s 19200
+#        (Windows: rigctld -m 3085 -r COM3 -s 19200)
+#   3. Run the bridge:
+#        meshtastic-ham-bridge -config configs/ic705.toml
+
+[[bridge]]
+name = "ic705-vhf"
+
+[bridge.mesh]
+type = "meshtastic"
+port = ""          # set to your Meshtastic serial port e.g. "COM4" or "/dev/ttyUSB1"
+
+[bridge.ham]
+type = "audio+rigctl"
+audio_device = "IC-705"   # IC-705 shows up as a USB audio device
+rigctl_host = "127.0.0.1"
+rigctl_port = 4532
