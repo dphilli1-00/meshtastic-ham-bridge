@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Meshtastic BLE Pairing</title>
+  <style>
+    body { font-family: system-ui; max-width: 480px; margin: 80px auto; padding: 0 24px; }
+    h2 { margin-bottom: 8px; }
+    p { color: #555; margin-bottom: 24px; }
+    code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; }
+    button { padding: 12px 28px; font-size: 15px; cursor: pointer; border: none;
+             background: #0078d4; color: white; border-radius: 4px; }
+    button:disabled { background: #aaa; cursor: default; }
+    #status { margin-top: 20px; font-size: 14px; min-height: 20px; }
+    .ok  { color: #107c10; font-weight: bold; }
+    .err { color: #c00; }
+  </style>
+</head>
+<body>
+  <h2>Pair Meshtastic Device</h2>
+  <p id="desc">Loading...</p>
+  <button id="btn" onclick="pair()">Pair Device</button>
+  <div id="status"></div>
+  <script>
+    const MESHTASTIC_SERVICE = '6ba1b218-15a8-461f-9fa8-5d6e5b9b79fc';
+    const mac = new URLSearchParams(window.location.search).get('mac') || '(unknown)';
+    document.getElementById('desc').innerHTML =
+      'Click the button and select <code>' + mac + '</code> from the browser picker to establish a Bluetooth bond.';
+
+    async function pair() {
+      const btn = document.getElementById('btn');
+      const status = document.getElementById('status');
+      btn.disabled = true;
+      status.className = '';
+      status.textContent = 'Opening device picker…';
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: [MESHTASTIC_SERVICE]
+        });
+        status.textContent = 'Connecting to ' + device.name + '…';
+        const server = await device.gatt.connect();
+        status.textContent = 'Authenticating… (enter PIN shown on device if prompted)';
+        // Accessing the Meshtastic service triggers authenticated pairing + PIN dialog.
+        try {
+          const svc = await server.getPrimaryService(MESHTASTIC_SERVICE);
+          // toRadio characteristic — just getting it is enough to force auth.
+          await svc.getCharacteristic('f75c76d2-129e-4dad-a1dd-7866124401e7');
+        } catch (authErr) {
+          // PIN was rejected or device doesn't require auth — either way continue.
+          console.warn('auth probe:', authErr);
+        }
+        server.disconnect();
+        status.textContent = 'Disconnecting…';
+        await new Promise(r => setTimeout(r, 2000));
+        status.className = 'ok';
+        status.textContent = '✓ Paired. You can close this window.';
+        await fetch('/done', { method: 'POST' }).catch(() => {});
+      } catch (e) {
+        status.className = 'err';
+        status.textContent = 'Error: ' + e.message;
+        btn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>

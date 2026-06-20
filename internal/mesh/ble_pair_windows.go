@@ -2,111 +2,185 @@
 
 package mesh
 
-// pairBLEDevice triggers Windows BLE pairing for a device that requires PIN entry.
-// Windows won't show a pairing dialog unless you explicitly call the pairing API,
-// so we use PowerShell to invoke the WinRT DeviceInformation pairing flow.
+// pairBLEDevice checks whether the device is already bonded to this PC via
+// Windows BLE. If paired, returns nil immediately. If not paired, returns a
+// descriptive error telling the user to pair once via the Meshtastic app.
 //
-// The Meshtastic node will display a 6-digit PIN on its screen; the user enters
-// it into the terminal here, and we feed it to the Windows pairing request.
+// Flow:
+//   BluetoothLEDeviceFromBluetoothAddressAsync
+//     → iBluetoothLEDevice2.GetDeviceInformation
+//     → IDeviceInformation2.get_Pairing → IsPaired check
 
 import (
 	"fmt"
-	"os/exec"
+	"strconv"
 	"strings"
+	"unsafe"
+
+	"github.com/go-ole/go-ole"
+	winrtble "github.com/saltosystems/winrt-go/windows/devices/bluetooth"
 )
 
-// pairBLEDevice pairs a BLE device by MAC address using PowerShell WinRT calls.
-// Prompts the user for the PIN displayed on the Meshtastic node screen.
-// Safe to call if already paired — it checks first.
+// pairBLEDevice ensures the device is bonded to Windows before connecting.
+// If already paired, returns immediately. Otherwise opens a local browser page
+// that uses Web Bluetooth to bond the device, then returns.
+// Safe to call if already paired.
 func pairBLEDevice(macAddr string) error {
-	// Normalize MAC address to lowercase colon format
-	mac := strings.ToLower(strings.ReplaceAll(macAddr, "-", ":"))
+	// Initialize COM for the duration of this function, then uninitialize so
+	// tinygo's adapter.Enable() can set up its own WinRT apartment cleanly.
+	// S_FALSE (1) = already initialized by another caller — both are fine.
+	ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED) //nolint:errcheck
+	defer ole.CoUninitialize()
 
-	// PowerShell script: check pairing status using WinRT via AsTask()
-	// WindowsRuntimeSystemExtensions.AsTask() bridges WinRT IAsyncOperation to .NET Task
-	psCheckPaired := fmt.Sprintf(`
-$null = [Windows.Devices.Bluetooth.BluetoothLEDevice, Windows.Devices.Bluetooth, ContentType=WindowsRuntime]
-$null = [Windows.Devices.Enumeration.DeviceInformationPairing, Windows.Devices.Enumeration, ContentType=WindowsRuntime]
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-
-function Await($op, $type) {
-    $m = [System.WindowsRuntimeSystemExtensions].GetMethods() |
-         Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 1 } |
-         Select-Object -First 1
-    $task = $m.MakeGenericMethod($type).Invoke($null, @($op))
-    $task.Wait() | Out-Null
-    $task.Result
-}
-
-$addrInt = [Convert]::ToUInt64(("%s" -replace ':', ''), 16)
-$op = [Windows.Devices.Bluetooth.BluetoothLEDevice]::FromBluetoothAddressAsync($addrInt)
-$device = Await $op ([Windows.Devices.Bluetooth.BluetoothLEDevice])
-if ($null -eq $device) { Write-Output "NOTFOUND"; exit 1 }
-if ($device.DeviceInformation.Pairing.IsPaired) { Write-Output "PAIRED" }
-else { Write-Output "NOTPAIRED" }
-`, mac)
-
-	out, err := runPS(psCheckPaired)
+	addrInt, err := macStringToUint64(macAddr)
 	if err != nil {
-		return fmt.Errorf("BLE pair check: %w", err)
+		return fmt.Errorf("BLE pair: invalid MAC %q: %w", macAddr, err)
 	}
-	out = strings.TrimSpace(out)
 
-	if out == "PAIRED" {
-		return nil // already paired, nothing to do
+	// 1. Get BluetoothLEDevice from address.
+	devOp, err := winrtble.BluetoothLEDeviceFromBluetoothAddressAsync(addrInt)
+	if err != nil {
+		return fmt.Errorf("BLE: FromBluetoothAddressAsync: %w", err)
 	}
-	if out == "NOTFOUND" {
+	defer devOp.Release()
+
+	devPtr, err := awaitAsyncOp(devOp, 10_000_000_000 /* 10s */)
+	if err != nil {
+		return fmt.Errorf("BLE: await device: %w", err)
+	}
+	if devPtr == nil {
 		return fmt.Errorf("BLE: device %s not found — is it in range?", macAddr)
 	}
+	bleDevUnk := (*ole.IUnknown)(devPtr)
+	defer bleDevUnk.Release()
 
-	fmt.Printf("BLE: pairing %s — watch for a Windows PIN dialog or notification...\n", macAddr)
-
-	// Use non-custom PairAsync — Windows handles the PIN dialog via its own UI (toast/notification).
-	// Custom pairing with PowerShell event handlers doesn't work for WinRT typed events.
-	psPair := fmt.Sprintf(`
-$null = [Windows.Devices.Bluetooth.BluetoothLEDevice, Windows.Devices.Bluetooth, ContentType=WindowsRuntime]
-$null = [Windows.Devices.Enumeration.DeviceInformationPairing, Windows.Devices.Enumeration, ContentType=WindowsRuntime]
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-
-function Await($op, $type) {
-    $m = [System.WindowsRuntimeSystemExtensions].GetMethods() |
-         Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 1 } |
-         Select-Object -First 1
-    $task = $m.MakeGenericMethod($type).Invoke($null, @($op))
-    $task.Wait() | Out-Null
-    $task.Result
-}
-
-$addrInt = [Convert]::ToUInt64(("%s" -replace ':', ''), 16)
-$op = [Windows.Devices.Bluetooth.BluetoothLEDevice]::FromBluetoothAddressAsync($addrInt)
-$device = Await $op ([Windows.Devices.Bluetooth.BluetoothLEDevice])
-if ($null -eq $device) { Write-Output "NOTFOUND"; exit 1 }
-
-$pairOp = $device.DeviceInformation.Pairing.PairAsync()
-$result = Await $pairOp ([Windows.Devices.Enumeration.DevicePairingResult])
-Write-Output $result.Status
-`, mac)
-
-	out, err = runPS(psPair)
+	// 2. QI for iBluetoothLEDevice2 to reach DeviceInformation.
+	ble2Itf, err := bleDevUnk.QueryInterface(ole.NewGUID(guidIBluetoothLEDevice2Enum))
 	if err != nil {
-		return fmt.Errorf("BLE pairing: %w", err)
+		return fmt.Errorf("BLE: QI iBluetoothLEDevice2: %w", err)
 	}
-	out = strings.TrimSpace(out)
-	if out != "Paired" && out != "AlreadyPaired" {
-		return fmt.Errorf("BLE pairing failed: %s", out)
-	}
-	fmt.Println("Paired successfully.")
-	return nil
-}
+	ble2 := (*iBLEDevice2ForPairing)(unsafe.Pointer(ble2Itf))
+	defer ble2.Release()
 
-func runPS(script string) (string, error) {
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
-	out, err := cmd.Output()
+	partialDevInfoUnk, err := ble2.getDeviceInformation()
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("powershell: %w\nstderr: %s", err, ee.Stderr)
+		return fmt.Errorf("BLE: GetDeviceInformation: %w", err)
+	}
+	defer partialDevInfoUnk.Release()
+
+	// The object from BluetoothLEDevice.DeviceInformation is a lightweight cached
+	// object that only implements IDeviceInformation v1 (no Pairing support).
+	// Get the device ID string from it, then call CreateFromIdAsync to get a full
+	// DeviceInformation object that supports IDeviceInformation2 + Pairing.
+	partialV1Itf, err := partialDevInfoUnk.QueryInterface(ole.NewGUID(guidIDeviceInformationV1))
+	if err != nil {
+		return fmt.Errorf("BLE: QI IDeviceInformation v1: %w", err)
+	}
+	partialV1 := (*iDeviceInformationV1)(unsafe.Pointer(partialV1Itf))
+	deviceId, err := partialV1.getId()
+	partialV1.Release()
+	if err != nil {
+		return fmt.Errorf("BLE: get_Id: %w", err)
+	}
+	fmt.Printf("BLE: device ID = %s\n", deviceId)
+
+	// 3. Get full DeviceInformation via CreateFromIdAsync.
+	fullDevOp, err := deviceInformationCreateFromIdAsync(deviceId)
+	if err != nil {
+		return fmt.Errorf("BLE: CreateFromIdAsync: %w", err)
+	}
+	defer fullDevOp.Release()
+
+	fullDevPtr, err := awaitAsyncOp(fullDevOp, 10_000_000_000)
+	if err != nil {
+		return fmt.Errorf("BLE: await full DeviceInformation: %w", err)
+	}
+	if fullDevPtr == nil {
+		return fmt.Errorf("BLE: CreateFromIdAsync returned nil")
+	}
+	fullDevUnk := (*ole.IUnknown)(fullDevPtr)
+	defer fullDevUnk.Release()
+
+	// Diagnostic: dump IIDs of the full object to confirm it has IDeviceInformation2.
+	if iids, iidErr := winrtGetIIDs(fullDevUnk); iidErr == nil {
+		fmt.Printf("BLE: full DeviceInformation IIDs (%d):\n", len(iids))
+		for _, id := range iids {
+			fmt.Printf("  %s\n", id)
 		}
-		return "", err
 	}
-	return string(out), nil
+
+	// 4. Find IDeviceInformation2 — try each observed IID, validate by checking
+	// that slot 7 (get_Pairing) returns a DeviceInformationPairing runtime class.
+	var pairing *iDeviceInformationPairing
+	for _, candidateGUID := range []string{
+		guidIDeviceInformation2,                 // {F156A638} confirmed at runtime
+		"2743208b-aff1-4038-be7a-93daed1f0687", // IID #4 observed in the wild
+	} {
+		itf, qiErr := fullDevUnk.QueryInterface(ole.NewGUID(candidateGUID))
+		if qiErr != nil {
+			fmt.Printf("BLE: QI {%s}: %v\n", candidateGUID, qiErr)
+			continue
+		}
+		candidate := (*iDeviceInformation2)(unsafe.Pointer(itf))
+		p, name, probeErr := probeDevInfo2GetPairing(candidate)
+		candidate.Release()
+		if probeErr != nil {
+			fmt.Printf("BLE: {%s} slot7 → %v\n", candidateGUID, probeErr)
+			continue
+		}
+		fmt.Printf("BLE: {%s} slot7 → %q\n", candidateGUID, name)
+		if name != "Windows.Devices.Enumeration.DeviceInformationPairing" {
+			(*ole.IUnknown)(unsafe.Pointer(p)).Release()
+			continue
+		}
+		fmt.Printf("BLE: IDeviceInformation2 GUID = {%s} ✓\n", candidateGUID)
+		pairing = p
+		break
+	}
+	if pairing == nil {
+		return fmt.Errorf("BLE: could not locate IDeviceInformation2/get_Pairing on DeviceInformation object")
+	}
+	defer pairing.Release()
+
+	// Diagnose the pairing object before using it.
+	pairingUnk := (*ole.IUnknown)(unsafe.Pointer(pairing))
+	if name, nerr := winrtRuntimeClassName(pairingUnk); nerr == nil {
+		fmt.Printf("BLE: pairing RuntimeClassName = %q\n", name)
+	}
+	if iids, iidErr := winrtGetIIDs(pairingUnk); iidErr == nil {
+		fmt.Printf("BLE: pairing IIDs (%d):\n", len(iids))
+		for _, id := range iids {
+			fmt.Printf("  %s\n", id)
+		}
+	}
+
+	// 5. Already paired? We're done.
+	isPaired, err := pairing.getIsPaired()
+	if err != nil {
+		return fmt.Errorf("BLE: IsPaired: %w", err)
+	}
+	if isPaired {
+		return nil
+	}
+
+	// 6. Not paired — instruct the user to pair via the Meshtastic app.
+	// Windows BLE pairing with a PIN requires a COM delegate callback that
+	// can't be safely implemented in pure Go against the WinRT ABI.
+	// Pair once via the Meshtastic mobile app or web client, then re-run.
+	return fmt.Errorf(
+		"BLE: %s is not paired to this PC.\n"+
+			"  Pair it once using the Meshtastic app (Android/iOS) or web client\n"+
+			"  at https://client.meshtastic.org, then re-run this command.\n"+
+			"  Once paired, this tool connects automatically on every subsequent run.",
+		macAddr,
+	)
+}
+
+// macStringToUint64 converts "C0:C2:24:70:D8:15" or "C0-C2-24-70-D8-15" to uint64.
+func macStringToUint64(mac string) (uint64, error) {
+	clean := strings.ReplaceAll(strings.ReplaceAll(mac, ":", ""), "-", "")
+	if len(clean) != 12 {
+		return 0, fmt.Errorf("expected 12 hex digits, got %d", len(clean))
+	}
+	return strconv.ParseUint(clean, 16, 64)
 }
