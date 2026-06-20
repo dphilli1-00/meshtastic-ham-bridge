@@ -1,56 +1,37 @@
 # iOS App
 
-## Structure
+Uses gomobile to generate a native iOS framework from the Go core.
+No manual C FFI or bridging header needed.
 
-```
-ios/
-  MeshtasticHamBridge/
-    bridge.h                  C header for Rust FFI exports
-    BridgingHeader.h          Xcode Objective-C bridging header
-    BridgeManager.swift       Swift wrapper around the Rust core
-    ContentView.swift         SwiftUI UI
-    MeshtasticHamBridgeApp.swift  App entry point
-```
-
-## Build steps (requires Mac + Xcode)
-
-### 1. Build the Rust static library for iOS
+## Generate the framework (requires Mac + Xcode)
 
 ```bash
-# Install iOS targets
-rustup target add aarch64-apple-ios          # physical iPhone
-rustup target add aarch64-apple-ios-sim      # simulator (Apple Silicon Mac)
-rustup target add x86_64-apple-ios           # simulator (Intel Mac)
-
-# Build
-cargo build --target aarch64-apple-ios --release
-cargo build --target aarch64-apple-ios-sim --release
-
-# Output: target/aarch64-apple-ios/release/libmeshtastic_ham_bridge.a
+go install golang.org/x/mobile/cmd/gomobile@latest
+gomobile init
+gomobile bind -target ios -o ios/MeshtasticHamBridge.xcframework \
+  github.com/dphilli/meshtastic-ham-bridge/mobile
 ```
 
-### 2. Create Xcode project
+This produces `ios/MeshtasticHamBridge.xcframework` — a native Swift-importable framework.
 
-1. Open Xcode → File → New → Project → iOS App
-2. Product Name: `MeshtasticHamBridge`
-3. Copy files from `ios/MeshtasticHamBridge/` into the project
+## Xcode setup
 
-### 3. Link the Rust library
+1. Open Xcode → New Project → iOS App
+2. Copy files from `ios/MeshtasticHamBridge/` into the project
+3. Drag `MeshtasticHamBridge.xcframework` into the project
+4. General → Frameworks, Libraries, Embedded Content → set to "Embed & Sign"
+5. No bridging header needed — just `import Mobile` in Swift
 
-In Xcode project settings:
-- **General → Frameworks, Libraries, Embedded Content** → add `libmeshtastic_ham_bridge.a`
-- **Build Settings → Library Search Paths** → add `$(PROJECT_DIR)/../../target/aarch64-apple-ios/release`
-- **Build Settings → Swift Compiler - General → Objective-C Bridging Header** → `MeshtasticHamBridge/BridgingHeader.h`
+## Info.plist permissions
 
-### 4. Info.plist permissions
-
-Add to `Info.plist`:
 ```xml
 <key>NSMicrophoneUsageDescription</key>
-<string>Meshtastic Ham Bridge uses the microphone to receive ham radio audio via AFSK.</string>
+<string>Used to receive ham radio audio via AFSK modem.</string>
 ```
 
-### 5. Run
+## Sideloading (no App Store needed)
 
-Build and run on a physical iPhone or simulator.
-The audio modem requires a real device for actual radio use.
+1. Connect iPhone
+2. Xcode → select your iPhone as target
+3. Product → Run (signs with your free Apple ID)
+Friends can sideload via AltStore or by building themselves.

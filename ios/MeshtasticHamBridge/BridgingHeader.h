@@ -1,5 +1,3 @@
-// Xcode bridging header — links Swift to the Rust C FFI.
-// In Xcode: Build Settings → Swift Compiler → Objective-C Bridging Header
-// Set to: MeshtasticHamBridge/BridgingHeader.h
-
-#include "bridge.h"
+// Bridging header is no longer needed.
+// gomobile generates a proper Swift/ObjC framework — no manual bridging required.
+// Import the framework in Xcode via: File → Add Packages → Add Local → MeshtasticHamBridge.xcframework
