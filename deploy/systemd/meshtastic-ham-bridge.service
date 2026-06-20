@@ -1,0 +1,27 @@
+[Unit]
+Description=Meshtastic Ham Bridge
+After=network.target
+# Wait for USB devices to settle before starting
+After=dev-ttyUSB0.device
+Wants=dev-ttyUSB0.device
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+ExecStart=/usr/local/bin/meshtastic-ham-bridge
+Restart=always
+RestartSec=5
+# Give USB devices time to come up after a restart
+RestartPreventExitStatus=1
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meshtastic-ham-bridge
+
+# Allow access to serial ports and audio
+SupplementaryGroups=dialout audio
+
+[Install]
+WantedBy=multi-user.target
