@@ -1,12 +1,44 @@
 # meshtastic-ham-bridge
 
-Designed to Bridge a Meshtastic mesh network to an HF/VHF ham radio link. Packets flow bidirectionally: Meshtastic nodes on one side, a Direwolf TNC, ARDOP modem, or audio device on the other.
+Bridges a Meshtastic mesh network to an HF/VHF ham radio link. Packets flow bidirectionally: Meshtastic nodes on one side, a Direwolf TNC, ARDOP modem, or audio device on the other.
 
 ```
 [Meshtastic mesh] <-> [bridge] <-> [Direwolf / ARDOP / audio+rigctld]
 ```
 
 Runs on Raspberry Pi (headless), Windows, Linux, and macOS. Supports serial and BLE connections to Meshtastic nodes.
+
+---
+
+## Status
+
+### Implemented and tested
+- **Core bridge loop** — bidirectional packet routing between MeshDevice and HamDevice
+- **Meshtastic BLE adapter (Windows)** — connects by MAC address, receives FromRadio packets
+- **Meshtastic serial adapter** — connects via USB serial, sends/receives protobuf
+- **Meshcore adapter** — serial connection to Meshcore nodes
+- **Direwolf KISS TCP adapter** — connects to a running Direwolf instance over TCP
+- **BLE device discovery** — scans and lists nearby BLE devices with RSSI
+- **Serial/audio device discovery** — lists ports and audio devices with Meshtastic hints
+- **Test harness** — `--test-ble`, `--test-serial` CLI flags for end-to-end connection tests
+- **Mock adapters** — MockMeshDevice and MockHamDevice for unit testing
+
+### Implemented, not yet fully tested
+- **Protobuf packet decoding** — FromRadio bytes are received but not yet unmarshalled
+- **Config system** — TOML config loader is wired up but not exercised end-to-end
+- **Raspberry Pi deployment** — Makefile targets and systemd unit exist, not yet field-tested
+
+### Not yet implemented
+- Packet forwarding (mesh → ham and ham → mesh) — adapters connect but don't bridge yet
+- Graceful reconnect on connection loss
+- PTT handling for audio/rigctld ham adapters
+- CAT control (IC-705, hamlib)
+- Web UI / remote monitoring
+- Loopback test mode
+- iOS audio adapter (PulseModem)
+- Android/ChromeOS app shell
+- Multi-hop routing and loop prevention
+- Winlink gateway mode
 
 ---
 
