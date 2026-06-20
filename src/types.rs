@@ -29,9 +29,18 @@ Other(String)
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceStatus {
-    connected: bool,
-battery_level: Option<u8>,
-is_charging: Option<bool>,
-node_id: Option<u32>,
-node_name: Option<String>
+    pub connected: bool,
+    pub battery_level: Option<u8>,
+    pub is_charging: Option<bool>,
+    pub node_id: Option<u32>,
+    pub node_name: Option<String>,
+}
+
+impl DeviceStatus {
+    pub fn connected() -> Self {
+        Self { connected: true, battery_level: None, is_charging: None, node_id: None, node_name: None }
+    }
+    pub fn disconnected() -> Self {
+        Self { connected: false, battery_level: None, is_charging: None, node_id: None, node_name: None }
+    }
 }

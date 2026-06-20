@@ -4,6 +4,7 @@ use crate::types::DeviceStatus;
 pub mod mock;
 pub mod direwolf;
 pub mod ardop;
+pub mod audio;
 #[async_trait]
 pub trait HamDevice {
     fn device_type(&self) -> &str;

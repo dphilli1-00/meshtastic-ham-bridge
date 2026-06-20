@@ -1,0 +1,9 @@
+C:\devspace\meshtastic-ham-bridge\target\debug\deps\num_integer-2cfcad7ae0371c85.d: C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\lib.rs C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\roots.rs C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\average.rs
+
+C:\devspace\meshtastic-ham-bridge\target\debug\deps\libnum_integer-2cfcad7ae0371c85.rlib: C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\lib.rs C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\roots.rs C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\average.rs
+
+C:\devspace\meshtastic-ham-bridge\target\debug\deps\libnum_integer-2cfcad7ae0371c85.rmeta: C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\lib.rs C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\roots.rs C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\average.rs
+
+C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\lib.rs:
+C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\roots.rs:
+C:\Users\dphil\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\average.rs:
