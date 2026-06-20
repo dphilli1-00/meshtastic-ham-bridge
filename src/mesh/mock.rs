@@ -65,8 +65,9 @@ impl MeshDevice for MockMeshDevice {
                 rx.recv().await.ok_or(crate::error::Error::Unknown("channel closed".into()))
             }
             MockMode::Source => {
-                // source generates packets, not implemented yet
-                todo!()
+                // source: test pre-loads packets via inject_packet(), bridge reads them out
+                let mut rx = self.in_rx.lock().await;
+                rx.recv().await.ok_or(crate::error::Error::Unknown("channel closed".into()))
             }
         }
     }

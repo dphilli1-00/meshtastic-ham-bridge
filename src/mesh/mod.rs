@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use crate::error::Result as MeshResult;
 use crate::types::DeviceStatus;
 
+pub mod meshtastic;
+pub mod meshcore;
 
 pub mod mock;
 #[async_trait]
