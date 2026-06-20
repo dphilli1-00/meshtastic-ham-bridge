@@ -13,32 +13,39 @@ Runs on Raspberry Pi (headless), Windows, Linux, and macOS. Supports serial and 
 ## Status
 
 ### Implemented and tested
-- **Core bridge loop** — bidirectional packet routing between MeshDevice and HamDevice
-- **Meshtastic BLE adapter (Windows)** — connects by MAC address, receives FromRadio packets
-- **Meshtastic serial adapter** — connects via USB serial, sends/receives protobuf
-- **Meshcore adapter** — serial connection to Meshcore nodes
-- **Direwolf KISS TCP adapter** — connects to a running Direwolf instance over TCP
+- **Core bridge loop** — bidirectional packet routing between MeshDevice and HamDevice, with unit tests
+- **Mock adapters** — MockMeshDevice and MockHamDevice used in bridge tests
+- **Meshtastic BLE adapter (Windows)** — connects by MAC address, discovers GATT characteristics, receives raw FromRadio bytes
+- **Meshtastic serial adapter** — opens serial port, background read loop, channel-based receive
 - **BLE device discovery** — scans and lists nearby BLE devices with RSSI
-- **Serial/audio device discovery** — lists ports and audio devices with Meshtastic hints
+- **Serial / audio device discovery** — lists ports and audio devices with Meshtastic/Digirig hints
+- **rigctld adapter** — TCP connection to rigctld, PTT keying, frequency/mode control; unit-tested with a fake server
 - **Test harness** — `--test-ble`, `--test-serial` CLI flags for end-to-end connection tests
-- **Mock adapters** — MockMeshDevice and MockHamDevice for unit testing
 
-### Implemented, not yet fully tested
-- **Protobuf packet decoding** — FromRadio bytes are received but not yet unmarshalled
-- **Config system** — TOML config loader is wired up but not exercised end-to-end
-- **Raspberry Pi deployment** — Makefile targets and systemd unit exist, not yet field-tested
+### Implemented with known gaps
+- **Direwolf KISS TCP adapter** — full KISS framing (encode + decode), TCP dial, background read loop; implemented but not integration-tested against a live Direwolf instance
+- **Bell 202 AFSK audio modem** — HDLC encode/bit-stuffing on TX, correlator demodulator + HDLC framing on RX via miniaudio; implemented but not tested on real hardware
+- **Meshtastic send (serial + BLE)** — transport works but outgoing packets are not yet wrapped in the `ToRadio` protobuf envelope; sending does not produce valid output
+- **Meshcore serial adapter** — transport layer only; protocol framing not implemented
+- **Config loader** — TOML round-trip works; `--init-config` and the config template function are not yet implemented
+- **Mobile bridge (gomobile)** — BLE path and `audio+rigctl` ham type not wired; audio discovery not implemented
 
 ### Not yet implemented
-- Packet forwarding (mesh → ham and ham → mesh) — adapters connect but don't bridge yet
+- Protobuf decoding of received `FromRadio` packets
+- `ToRadio` protobuf wrapping for outgoing packets
+- Actual packet forwarding between mesh and ham sides (adapters connect independently; no packets flow through yet)
+- Meshcore protocol framing
 - Graceful reconnect on connection loss
-- PTT handling for audio/rigctld ham adapters
-- CAT control (IC-705, hamlib)
-- Web UI / remote monitoring
+- PTT sequencing for audio/rigctld adapters
+- CAT control (IC-705, generic hamlib)
+- `--init-config` / config template
 - Loopback test mode
-- iOS audio adapter (PulseModem)
-- Android/ChromeOS app shell
+- iOS audio adapter (PulseModem / Swift FFI)
+- Android / ChromeOS app shell
+- Web UI and remote monitoring
 - Multi-hop routing and loop prevention
 - Winlink gateway mode
+- Raspberry Pi deployment (Makefile targets exist, not field-tested)
 
 ---
 
