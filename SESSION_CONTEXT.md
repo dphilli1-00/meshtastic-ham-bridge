@@ -163,19 +163,27 @@ AGWPORT 0
 2. Handle config stream: drain MyNodeInfo + NodeInfo + ConfigCompleteId before "ready"
 3. Wrap outgoing packets in ToRadio protobuf envelope
 4. Wire up actual packet forwarding through the bridge loop
-5. Integration-test Direwolf KISS adapter against live Direwolf instance
+5. Wire up buildHam() in main.go to use LaunchDirewolfWithBinary with platform detection
 6. Strip diagnostic fmt.Printf calls from ble_pair_windows.go and meshtastic_ble.go
 7. Fix --init-config (config.Template() missing)
 
 ## Audio Hardware Notes
 - Digirig = USB audio (CM108) + PTT GPIO in one plug. Convenient but not required.
 - Any CM108-based USB audio dongle (~$5) is functionally equivalent.
-- Many modern laptops have no audio jack — for those, options are:
-  1. USB audio dongle (recommended, cheap)
-  2. Remote Direwolf: run Direwolf on a Pi/go-box that has audio, bridge connects via KISS TCP over network
-  3. CAT PTT via rigctld if radio supports USB CAT (no audio adapter needed for PTT)
+- Many modern laptops and phones have no audio jack — solution is the same everywhere:
+    USB-C → USB audio adapter (Digirig or equivalent) → Radio
+- This is a standard USB Audio Class device. Works on Windows, Linux, macOS, Android, iOS (via CCK).
+- Phone IS the radio interface. No Pi required for mobile use — phone audio + modem + Meshtastic BLE.
 - ConnectDirewolf (remote) vs LaunchDirewolfWithBinary (local) — distinction is whether cmd is nil.
 - Config wizard should detect available audio output devices and warn / steer toward remote Direwolf if none found.
+
+## PTT Strategy (per platform)
+- **Desktop (Windows/Linux/macOS)**: CM108 GPIO via Direwolf, or RTS/DTR via USB serial, or rigctld CAT
+- **Android**: CM108 GPIO via UsbManager HID, or VOX
+- **iOS**: VOX only — iOS blocks USB HID access to CM108. This is fine: this app sends packets,
+  not real-time voice. AX.25 already has TXDelay; a few hundred ms of VOX tail doesn't matter.
+- **VOX** is the universal fallback and works everywhere with zero extra code.
+  Enable on the radio side; no PTT logic needed in software.
 
 ## SDR Discussion (this session)
 Considered using SDR to replace all RF hardware with one device. Conclusion: not practical.

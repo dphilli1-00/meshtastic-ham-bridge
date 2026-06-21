@@ -1,12 +1,32 @@
 # meshtastic-ham-bridge
 
-Bridges a Meshtastic mesh network to an HF/VHF ham radio link. Packets flow bidirectionally: Meshtastic nodes on one side, a Direwolf TNC, ARDOP modem, or audio device on the other.
+Bridges a Meshtastic mesh network to an HF/VHF ham radio link. Packets flow bidirectionally: Meshtastic nodes on one side, a Direwolf TNC or audio modem on the other.
 
 ```
-[Meshtastic mesh] <-> [bridge] <-> [Direwolf / ARDOP / audio+rigctld]
+[Meshtastic mesh] <-> [bridge] <-> [Direwolf / audio modem] <-> [Radio]
 ```
 
-Runs on Raspberry Pi (headless), Windows, Linux, and macOS. Supports serial and BLE connections to Meshtastic nodes.
+Runs on Raspberry Pi (headless), Windows, Linux, macOS, Android, and iOS. Supports serial and BLE connections to Meshtastic nodes.
+
+### Hardware
+
+The radio interface is a standard USB audio adapter (e.g. [Digirig](https://digirig.net)) connected between the device and the radio. This works on any platform — including phones and tablets that lack a headphone jack — via a USB-C adapter.
+
+```
+[Phone / Laptop / Pi]
+        |
+   USB-C / USB-A
+        |
+  [USB audio adapter]  ← Digirig or any USB audio dongle
+        |
+    3.5mm cable
+        |
+    [Ham radio]
+```
+
+PTT (keying the transmitter) is handled per platform:
+- **Desktop / Android** — CM108 GPIO via the Digirig, or RTS/DTR via USB serial, or CAT via rigctld
+- **iOS** — VOX (audio-triggered PTT on the radio). This is fine: the bridge sends data packets, not real-time voice. AX.25 TXDelay already accommodates the VOX tail.
 
 ---
 
@@ -20,15 +40,17 @@ Runs on Raspberry Pi (headless), Windows, Linux, and macOS. Supports serial and 
 - **BLE device discovery** — scans and lists nearby BLE devices with RSSI
 - **Serial / audio device discovery** — lists ports and audio devices with Meshtastic/Digirig hints
 - **rigctld adapter** — TCP connection to rigctld, PTT keying, frequency/mode control; unit-tested with a fake server
-- **Test harness** — `--test-ble`, `--test-serial` CLI flags for end-to-end connection tests
+- **Direwolf KISS TCP adapter** — full KISS framing, subprocess launch, CM108 PTT; RF loopback tested end-to-end with two radios and two Digirigs
+- **Direwolf config wizard** — interactive setup (`--setup-direwolf`), audio device enumeration via malgo
+- **RF loopback test** — `--test-direwolf tx.conf,rx.conf`; config file order doesn't matter
+- **Test harness** — `--test-ble`, `--test-serial`, `--test-direwolf` CLI flags
 
 ### Implemented with known gaps
-- **Direwolf KISS TCP adapter** — full KISS framing (encode + decode), TCP dial, background read loop; implemented but not integration-tested against a live Direwolf instance
 - **Bell 202 AFSK audio modem** — HDLC encode/bit-stuffing on TX, correlator demodulator + HDLC framing on RX via miniaudio; implemented but not tested on real hardware
 - **Meshtastic send (serial + BLE)** — transport works but outgoing packets are not yet wrapped in the `ToRadio` protobuf envelope; sending does not produce valid output
 - **Meshcore serial adapter** — transport layer only; protocol framing not implemented
 - **Config loader** — TOML round-trip works; `--init-config` and the config template function are not yet implemented
-- **Mobile bridge (gomobile)** — BLE path and `audio+rigctl` ham type not wired; audio discovery not implemented
+- **Mobile bridge (gomobile)** — BLE path and audio ham type not wired; audio discovery not implemented
 
 ### Not yet implemented
 - Protobuf decoding of received `FromRadio` packets
@@ -36,12 +58,9 @@ Runs on Raspberry Pi (headless), Windows, Linux, and macOS. Supports serial and 
 - Actual packet forwarding between mesh and ham sides (adapters connect independently; no packets flow through yet)
 - Meshcore protocol framing
 - Graceful reconnect on connection loss
-- PTT sequencing for audio/rigctld adapters
 - CAT control (IC-705, generic hamlib)
 - `--init-config` / config template
-- Loopback test mode
-- iOS audio adapter (PulseModem / Swift FFI)
-- Android / ChromeOS app shell
+- Android / iOS / ChromeOS app shell
 - Web UI and remote monitoring
 - Multi-hop routing and loop prevention
 - Winlink gateway mode
@@ -51,9 +70,10 @@ Runs on Raspberry Pi (headless), Windows, Linux, and macOS. Supports serial and 
 
 ## Requirements
 
-- Go 1.22+
+- Go 1.22+ (with CGO enabled for audio device enumeration — requires TDM-GCC on Windows)
 - A Meshtastic node (serial USB or BLE)
-- One of: [Direwolf](https://github.com/wb2osz/direwolf), [ARDOP](https://www.cantab.net/users/john.wiseman/Documents/Latest%20Ardop%20Docs/ardopc.pdf), or a sound card modem (e.g. Digirig)
+- A USB audio adapter connecting your device to the radio (e.g. [Digirig](https://digirig.net))
+- [Direwolf](https://github.com/wb2osz/direwolf) for desktop/Pi use (not required on mobile)
 
 ---
 
