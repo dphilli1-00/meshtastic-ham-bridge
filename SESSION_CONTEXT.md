@@ -28,7 +28,10 @@ no runtime dependencies.
 ### Implemented with known gaps
 - Direwolf KISS TCP (`internal/ham/direwolf.go`) — full KISS framing, **RF loopback tested and passing**
 - Bell 202 AFSK audio modem (`internal/ham/audio.go`) — full TX/RX implementation,
-  not tested on real hardware
+  tested on real hardware. TX tones heard on radio (VOX keys), RX energy detected (0.5-0.7),
+  but demodulator produces garbage — FM pre-emphasis/de-emphasis distorts AFSK tone amplitudes
+  enough that the simple EMA correlator can't decode. Needs proper DSP (de-emphasis filter,
+  matched filter, clock recovery) before it's usable. Park and use Direwolf for now.
 - Meshtastic send (serial + BLE) — transport works but no ToRadio protobuf wrapping yet
 - Meshcore serial adapter (`internal/mesh/meshcore.go`) — transport only, no protocol framing
 - Config loader (`internal/config/config.go`) — TOML works; --init-config missing,
@@ -132,6 +135,16 @@ go run ./cmd/bridge --setup-direwolf direwolf-tx.conf
 go run ./cmd/bridge --setup-direwolf direwolf-rx.conf
 ```
 
+## Hardware Notes — Digirig Cables
+- **Green cables = bad PTT.** The 2.5mm plug on the green Baofeng K1 cables does not make reliable
+  contact with the radio's PTT jack. CM108 PTT light comes on but radio never keys.
+- **Black cables = working.** Use black K1 cables for both radios.
+- Current working HID paths (may change if Digirigs are replugged — run cm108.exe to verify):
+  - TX Digirig: `\\?\hid#vid_0d8c&pid_0012&mi_03#7&1e6ae4c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}`
+  - RX Digirig: `\\?\hid#vid_0d8c&pid_0012&mi_03#7&1b7c84e&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}`
+- HID paths are NOT stable across USB replugs — if PTT stops working, run cm108.exe and update configs.
+- If Digirigs are swapped between radios, update ADEVICE names in configs too.
+
 ## Direwolf / KISS Notes
 - Direwolf 1.8.1 always binds port 8001 as a default KISS port in addition to any configured KISSPORT.
   AGWPORT 0 disables the AGW port but does NOT suppress the extra 8001 KISS bind.
@@ -157,6 +170,97 @@ AGWPORT 0
 ```
 
 ---
+
+## Future: Full-Up Integration Test
+End-to-end loopback with real hardware on both sides:
+```
+[Meshtastic node A] → bridge TX → Direwolf TX → RF → Direwolf RX → bridge RX → [Meshtastic node B]
+```
+Assert that a packet injected at node A arrives at node B intact. Requires:
+- Protobuf decode/encode working
+- Bridge actually forwarding packets
+- Two Meshtastic nodes + two radios + two Digirigs (same hardware as current RF loopback test)
+
+Can reuse `--test-direwolf` RF path; just need to wrap it with Meshtastic on both ends.
+
+---
+
+## Universal Modem Architecture (DECIDED)
+
+Single modem stack: **liquid-dsp OFDM flex frame** everywhere. Direwolf retained as
+opt-in AX.25/APRS compatibility layer only.
+
+### Why liquid-dsp OFDM
+
+The modem operates in **audio space** (300–3000 Hz). The radio converts audio to RF —
+HF SSB, VHF FM, UHF FM all expose the same audio passband to software. So one modem
+works across all bands.
+
+`ofdmflexframegen` / `ofdmflexframesync` chosen because:
+- OFDM handles HF multipath fading and FM pre-emphasis/de-emphasis automatically
+- Pilot symbols for built-in timing + frequency sync — no manual clock recovery
+- Includes framing: header, variable payload, CRC, FEC. Replaces `framing.go`.
+- Configurable to fit 300–2700 Hz audio band (HF SSB compatible)
+- ~100–500 bps — sufficient for Meshtastic packet backhaul
+
+### Modem code location
+
+```
+internal/ham/liquid/
+  modem.go          ← CGO wrapper: ofdmflexframegen/framesync TX/RX
+  liquid_shim.h     ← C shim: callbacks, type bridging
+  adapter.go        ← implements ham.Device; owns malgo audio + PTT
+```
+
+### Platform matrix
+
+| Platform   | Modem              | Audio           | PTT                   |
+|------------|--------------------|-----------------|-----------------------|
+| Windows    | liquid-dsp (mingw) | malgo/WASAPI    | CM108 HID (existing)  |
+| macOS      | liquid-dsp         | malgo/CoreAudio | CM108 HID or VOX      |
+| Linux/Pi   | liquid-dsp         | malgo/ALSA      | CM108 HID or VOX      |
+| Android    | liquid-dsp (NDK)   | malgo/OpenSL    | UsbManager HID / VOX  |
+| iOS        | liquid-dsp (Xcode) | malgo/CoreAudio | VOX                   |
+
+Direwolf KISS TCP adapter stays in `internal/ham/direwolf.go` for AX.25 interop.
+
+### Build tags
+
+- Default (no tags): Direwolf KISS TCP (existing, working on all platforms)
+- `-tags liquid`: liquid-dsp OFDM modem via CGO
+
+### Windows note — do NOT use `-tags liquid` on Windows
+
+liquid-dsp 2.x logging layer uses Newlib/Cygwin symbols (`__getreent`, `__assert_func`,
+`strsep`) that don't exist in MinGW's libc. This is a known upstream issue with no clean
+workaround via MSYS2 or TDM-GCC.
+
+**Windows dev workflow: use Direwolf (default build, already working).**
+The liquid path targets Pi/iOS/Android only:
+- Pi: `apt install libliquid-dev && go build -tags liquid`
+- iOS: Xcode toolchain (no Windows CRT issues)
+- Android: NDK toolchain (same)
+
+### CM108 PTT per platform
+
+- Desktop/Pi: `karalabe/hid` (existing, working)
+- Android: UsbManager HID (Java side, not yet implemented)
+- iOS: VOX only (Digirig level-matches it; fine for packet)
+
+## Go AFSK Modem — DSP Work Needed
+The correlator demodulator in `internal/ham/audio.go` does not work on real FM radio audio.
+Root cause: FM radios apply pre-emphasis on TX and de-emphasis on RX (6dB/octave filter).
+This changes the relative amplitude of 1200 Hz vs 2200 Hz tones by ~5dB, enough to flip bit
+decisions in a simple energy-comparison demodulator.
+
+To fix, need one of:
+1. **De-emphasis filter on RX path** — apply inverse 6dB/octave (HPF) before demodulation
+2. **Matched filter bank** — replace EMA correlators with proper matched filters
+3. **Clock recovery** — fix the free-running bit clock, use transition detection
+4. **Just use Direwolf** — it has all of this already. Preferred approach.
+
+The `--test-audio` flag stays for testing the audio path itself but don't expect decode to work
+until the DSP is fixed.
 
 ## Immediate Next Steps (priority order)
 1. Decode received FromRadio protobuf bytes (import meshtastic-go protobufs)

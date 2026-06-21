@@ -31,6 +31,10 @@ func main() {
 		setupDirewolf  = flag.String("setup-direwolf", "", "run interactive Direwolf config wizard, write to given path (e.g. direwolf-tx.conf)")
 		testDirewolf   = flag.String("test-direwolf", "", "RF loopback test: --test-direwolf tx.conf,rx.conf")
 		testDirewolfRX = flag.Bool("rx", false, "with single --test-direwolf conf: listen only, print received frames")
+		testAudio      = flag.String("test-audio", "", "audio modem loopback test: --test-audio \"tx device\",\"rx device\"")
+		testAudioTones = flag.String("test-audio-tones", "", "raw tone test (no HDLC): --test-audio-tones \"tx device\",\"rx device\"")
+		pttPath        = flag.String("ptt", "", "CM108 HID path for PTT (leave empty for VOX/auto-detect)")
+		listCM108      = flag.Bool("list-cm108", false, "list CM108 HID devices and exit")
 		verbose        = flag.Bool("v", false, "verbose logging")
 	)
 	flag.Parse()
@@ -40,6 +44,11 @@ func main() {
 		level = slog.LevelDebug
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
+	if *listCM108 {
+		ham.ListCM108()
+		return
+	}
 
 	if *setupDirewolf != "" {
 		kissPort := 8001
@@ -198,6 +207,97 @@ func main() {
 			}
 		}
 		return
+	}
+
+	if *testAudio != "" {
+		parts := strings.SplitN(*testAudio, ",", 2)
+		if len(parts) != 2 {
+			fmt.Fprintf(os.Stderr, "usage: --test-audio \"tx device name\",\"rx device name\"\n")
+			os.Exit(1)
+		}
+		txName := strings.Trim(strings.TrimSpace(parts[0]), "\"")
+		rxName := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		go func() { <-sig; cancel() }()
+
+		runAudioTest(ctx, txName, rxName, *pttPath)
+		return
+	}
+
+	if *testAudioTones != "" {
+		parts := strings.SplitN(*testAudioTones, ",", 2)
+		if len(parts) != 2 {
+			fmt.Fprintf(os.Stderr, "usage: --test-audio-tones \"tx device\",\"rx device\"\n")
+			os.Exit(1)
+		}
+		txName := strings.Trim(strings.TrimSpace(parts[0]), "\"")
+		rxName := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+
+		fmt.Printf("Opening TX audio device %q...\n", txName)
+		tx, err := ham.NewAudioTX(txName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "TX audio: %v\n", err)
+			os.Exit(1)
+		}
+		defer tx.Close()
+
+		fmt.Printf("Opening RX audio device %q...\n", rxName)
+		rx, err := ham.NewAudioRX(rxName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "RX audio: %v\n", err)
+			os.Exit(1)
+		}
+		defer rx.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		go func() { <-sig; cancel() }()
+
+		// Print raw bit decisions as M/S characters, plus disc value every 80 bits.
+		go func() {
+			var line []byte
+			for {
+				select {
+				case b := <-rx.RawBits():
+					if b {
+						line = append(line, 'M')
+					} else {
+						line = append(line, 'S')
+					}
+					if len(line) >= 80 {
+						fmt.Printf("bits: %s  energy=%.3f disc=%.6f\n", line, rx.Energy(), rx.Disc())
+						line = line[:0]
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
+		// Send 1s mark then 1s space, repeatedly.
+		// 1200 baud × 1s = 1200 bits per tone.
+		nBits := 1200
+		pattern := make([]bool, nBits*2)
+		for i := range pattern {
+			pattern[i] = i < nBits // first half = mark (1200 Hz), second = space (2200 Hz)
+		}
+		fmt.Println("Sending 1s×mark(1200Hz) + 1s×space(2200Hz) every 3s. Expect: MMM...SSS...")
+		fmt.Println("energy=0 means RX device not receiving signal.")
+		for {
+			fmt.Println("TX: tones")
+			tx.SendTones(pattern)
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ctx.Done():
+				return
+			}
+		}
 	}
 
 	if *testSerial != "" {

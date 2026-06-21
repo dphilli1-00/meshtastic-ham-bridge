@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gen2brain/malgo"
 	"github.com/dphilli/meshtastic-ham-bridge/internal/types"
@@ -85,109 +87,186 @@ type AudioDevice struct {
 	inDevice  *malgo.Device
 	outDevice *malgo.Device
 	recv      chan []byte
+	rawBits   chan bool // raw bit decisions before framing, for diagnostics
 	demod     *demodulator
 	mod       *modulator
+	ptt       PTT
+	frx       *frameDecoder
 }
 
-// NewAudio opens the named audio device (substring match) or system default if name is "".
+// Energy returns the current signal energy level (EMA of power).
+// Useful for calibrating energyThreshold.
+func (a *AudioDevice) Energy() float64 {
+	return a.demod.energy
+}
+
+// Disc returns the current smoothed FM discriminator output.
+// Negative → mark (1200 Hz), Positive → space (2200 Hz).
+func (a *AudioDevice) Disc() float64 {
+	return a.demod.disc
+}
+
+// RawBits returns the channel of raw bit decisions from the demodulator,
+// bypassing HDLC framing. Useful for diagnosing the demodulator.
+func (a *AudioDevice) RawBits() <-chan bool {
+	return a.rawBits
+}
+
+// SendTones queues a raw alternating mark/space pattern (n bits each) with no
+// HDLC framing. Useful for testing the demodulator in isolation.
+func (a *AudioDevice) SendTones(pattern []bool) {
+	a.mod.enqueueBits(pattern)
+}
+
+// NewAudio opens the named audio device for both TX and RX (substring match).
+// Use NewAudioTX / NewAudioRX when TX and RX are on different devices.
 func NewAudio(deviceName string) (*AudioDevice, error) {
+	return newAudio(deviceName, deviceName)
+}
+
+// NewAudioTX opens a TX-only AudioDevice (playback). RecvFrame will block forever.
+func NewAudioTX(playbackDevice string) (*AudioDevice, error) {
+	return newAudio("", playbackDevice)
+}
+
+// NewAudioRX opens an RX-only AudioDevice (capture). SendFrame is a no-op.
+func NewAudioRX(captureDevice string) (*AudioDevice, error) {
+	return newAudio(captureDevice, "")
+}
+
+// newAudio opens capture and/or playback devices by name (substring match).
+// Pass "" to skip opening that direction.
+func newAudio(captureName, playbackName string) (*AudioDevice, error) {
 	mctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("malgo init: %w", err)
 	}
 
 	a := &AudioDevice{
-		mctx:  mctx,
-		recv:  make(chan []byte, 32),
-		demod: newDemodulator(),
-		mod:   newModulator(),
+		mctx:    mctx,
+		recv:    make(chan []byte, 32),
+		rawBits: make(chan bool, 4096),
+		demod:   newDemodulator(),
+		mod:     newModulator(),
+		ptt:     VOXPTT{},        // default: VOX (no-op PTT)
+		frx:     newFrameDecoder(), // simple robust framing
 	}
 
-	// Find device if name specified
-	var inDevID, outDevID *malgo.DeviceID
-	if deviceName != "" {
+	// Capture (mic → demodulator)
+	if captureName != "" {
+		var inDevID *malgo.DeviceID
 		captures, _ := mctx.Devices(malgo.Capture)
 		for _, d := range captures {
-			if strings.Contains(d.Name(), deviceName) {
+			if strings.Contains(d.Name(), captureName) {
 				id := d.ID
 				inDevID = &id
 				break
 			}
 		}
+		if inDevID == nil {
+			return nil, fmt.Errorf("audio capture device %q not found", captureName)
+		}
+		captureCfg := malgo.DefaultDeviceConfig(malgo.Capture)
+		captureCfg.Capture.Format = malgo.FormatF32
+		captureCfg.Capture.Channels = 1
+		captureCfg.SampleRate = sampleRate
+		captureCfg.Capture.DeviceID = inDevID.Pointer()
+		captureCallbacks := malgo.DeviceCallbacks{
+			Data: func(_, pInput []byte, frameCount uint32) {
+				samples := bytesToFloat32(pInput)
+				_, bits := a.demod.pushBits(samples)
+				for _, b := range bits {
+					select {
+					case a.rawBits <- b:
+					default:
+					}
+					if frame := a.frx.push(b); frame != nil {
+						select {
+						case a.recv <- frame:
+						default:
+						}
+					}
+				}
+			},
+		}
+		a.inDevice, err = malgo.InitDevice(mctx.Context, captureCfg, captureCallbacks)
+		if err != nil {
+			return nil, fmt.Errorf("malgo capture init: %w", err)
+		}
+		if err := a.inDevice.Start(); err != nil {
+			return nil, fmt.Errorf("malgo capture start: %w", err)
+		}
+	}
+
+	// Playback (modulator → speaker)
+	if playbackName != "" {
+		var outDevID *malgo.DeviceID
 		playbacks, _ := mctx.Devices(malgo.Playback)
 		for _, d := range playbacks {
-			if strings.Contains(d.Name(), deviceName) {
+			if strings.Contains(d.Name(), playbackName) {
 				id := d.ID
 				outDevID = &id
 				break
 			}
 		}
-		if inDevID == nil || outDevID == nil {
-			return nil, fmt.Errorf("audio device %q not found", deviceName)
+		if outDevID == nil {
+			return nil, fmt.Errorf("audio playback device %q not found", playbackName)
+		}
+		playbackCfg := malgo.DefaultDeviceConfig(malgo.Playback)
+		playbackCfg.Playback.Format = malgo.FormatF32
+		playbackCfg.Playback.Channels = 1
+		playbackCfg.SampleRate = sampleRate
+		playbackCfg.Playback.DeviceID = outDevID.Pointer()
+		playbackCallbacks := malgo.DeviceCallbacks{
+			Data: func(pOutput, _ []byte, frameCount uint32) {
+				a.mod.fill(pOutput, int(frameCount))
+			},
+		}
+		a.outDevice, err = malgo.InitDevice(mctx.Context, playbackCfg, playbackCallbacks)
+		if err != nil {
+			return nil, fmt.Errorf("malgo playback init: %w", err)
+		}
+		if err := a.outDevice.Start(); err != nil {
+			return nil, fmt.Errorf("malgo playback start: %w", err)
 		}
 	}
 
-	// Capture (mic → demodulator)
-	captureCfg := malgo.DefaultDeviceConfig(malgo.Capture)
-	captureCfg.Capture.Format = malgo.FormatF32
-	captureCfg.Capture.Channels = 1
-	captureCfg.SampleRate = sampleRate
-	if inDevID != nil {
-		captureCfg.Capture.DeviceID = inDevID.Pointer()
-	}
-	captureCallbacks := malgo.DeviceCallbacks{
-		Data: func(_, pInput []byte, frameCount uint32) {
-			samples := bytesToFloat32(pInput)
-			for _, frame := range a.demod.push(samples) {
-				select {
-				case a.recv <- frame:
-				default:
-				}
-			}
-		},
-	}
-	a.inDevice, err = malgo.InitDevice(mctx.Context, captureCfg, captureCallbacks)
-	if err != nil {
-		return nil, fmt.Errorf("malgo capture init: %w", err)
-	}
-
-	// Playback (modulator → speaker)
-	playbackCfg := malgo.DefaultDeviceConfig(malgo.Playback)
-	playbackCfg.Playback.Format = malgo.FormatF32
-	playbackCfg.Playback.Channels = 1
-	playbackCfg.SampleRate = sampleRate
-	if outDevID != nil {
-		playbackCfg.Playback.DeviceID = outDevID.Pointer()
-	}
-	playbackCallbacks := malgo.DeviceCallbacks{
-		Data: func(pOutput, _ []byte, frameCount uint32) {
-			a.mod.fill(pOutput, int(frameCount))
-		},
-	}
-	a.outDevice, err = malgo.InitDevice(mctx.Context, playbackCfg, playbackCallbacks)
-	if err != nil {
-		return nil, fmt.Errorf("malgo playback init: %w", err)
-	}
-
-	if err := a.inDevice.Start(); err != nil {
-		return nil, fmt.Errorf("malgo capture start: %w", err)
-	}
-	if err := a.outDevice.Start(); err != nil {
-		return nil, fmt.Errorf("malgo playback start: %w", err)
-	}
 	return a, nil
 }
 
+// SetPTT replaces the default VOXPTT with an active PTT implementation.
+func (a *AudioDevice) SetPTT(p PTT) { a.ptt = p }
+
 func (a *AudioDevice) DeviceType() string { return "audio-afsk" }
 
+// SendFrame keys PTT, queues the AFSK-encoded frame, then releases PTT once
+// the modulator drains. The modulator encodes a ~333ms preamble before data,
+// so the radio has time to fully key before bits start.
 func (a *AudioDevice) SendFrame(ctx context.Context, data []byte) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		a.mod.enqueue(data)
-		return nil
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	if err := a.ptt.On(); err != nil {
+		return fmt.Errorf("PTT on: %w", err)
+	}
+	a.mod.enqueueBits(frameEncode(data))
+	// Wait for modulator to drain (preamble + data + tail).
+	// At 1200 baud, 50 flags (~333ms) + data. Poll every 10ms.
+	for {
+		a.mod.mu.Lock()
+		pending := len(a.mod.pending)
+		a.mod.mu.Unlock()
+		if pending == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			_ = a.ptt.Off()
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	return a.ptt.Off()
 }
 
 func (a *AudioDevice) RecvFrame(ctx context.Context) ([]byte, error) {
@@ -204,10 +283,14 @@ func (a *AudioDevice) Status(_ context.Context) (types.DeviceStatus, error) {
 }
 
 func (a *AudioDevice) Close() error {
-	a.inDevice.Stop()
-	a.outDevice.Stop()
-	a.inDevice.Uninit()
-	a.outDevice.Uninit()
+	if a.inDevice != nil {
+		a.inDevice.Stop()
+		a.inDevice.Uninit()
+	}
+	if a.outDevice != nil {
+		a.outDevice.Stop()
+		a.outDevice.Uninit()
+	}
 	a.mctx.Uninit()
 	return nil
 }
@@ -217,15 +300,31 @@ func (a *AudioDevice) Close() error {
 // ---------------------------------------------------------------------------
 
 type modulator struct {
+	mu      sync.Mutex
 	phase   float64
 	pending []float32
 }
 
 func newModulator() *modulator { return &modulator{} }
 
+// enqueueBits queues raw bits (true=mark/1200Hz, false=space/2200Hz) with no framing.
+func (m *modulator) enqueueBits(bits []bool) {
+	samples := m.bitsToSamples(bits)
+	m.mu.Lock()
+	m.pending = append(m.pending, samples...)
+	m.mu.Unlock()
+}
+
 func (m *modulator) enqueue(data []byte) {
-	bits := hdlcEncode(data)
+	samples := m.bitsToSamples(hdlcEncode(data))
+	m.mu.Lock()
+	m.pending = append(m.pending, samples...)
+	m.mu.Unlock()
+}
+
+func (m *modulator) bitsToSamples(bits []bool) []float32 {
 	spb := float64(sampleRate) / baudRate
+	out := make([]float32, 0, int(float64(len(bits))*spb))
 	for _, bit := range bits {
 		freq := spaceFreq
 		if bit {
@@ -233,16 +332,19 @@ func (m *modulator) enqueue(data []byte) {
 		}
 		n := int(spb)
 		for i := 0; i < n; i++ {
-			m.pending = append(m.pending, float32(math.Sin(2*math.Pi*m.phase)*0.7))
+			out = append(out, float32(math.Sin(2*math.Pi*m.phase)*0.7))
 			m.phase += freq / float64(sampleRate)
 			if m.phase >= 1.0 {
 				m.phase -= 1.0
 			}
 		}
 	}
+	return out
 }
 
 func (m *modulator) fill(out []byte, frames int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for i := 0; i < frames; i++ {
 		var s float32
 		if len(m.pending) > 0 {
@@ -258,49 +360,152 @@ func (m *modulator) fill(out []byte, frames int) {
 }
 
 // ---------------------------------------------------------------------------
-// Bell 202 AFSK demodulator
+// Bell 202 AFSK demodulator — FM discriminator approach
 // ---------------------------------------------------------------------------
+//
+// Architecture:
+//   1. Quadrature mix input to baseband at center frequency (1700 Hz).
+//   2. LPF I and Q channels (cutoff ~700 Hz, ≈ half the 1000 Hz deviation).
+//   3. FM discriminator: freq = Im(conj(z[n-1]) * z[n]) = Q_prev*I - I_prev*Q.
+//      disc < 0 → below center (1200 Hz mark → bit 1)
+//      disc > 0 → above center (2200 Hz space → bit 0)
+//   4. LPF discriminator output to reject noise.
+//   5. Clock recovery: on disc sign change (bit transition), nudge bitClock
+//      toward a bit boundary (bitClock ≈ 0).
+//   6. Energy squelch via EMA of input power.
+//
+// Advantage over bandpass filter approach: discriminator output tracks
+// instantaneous frequency and doesn't have the saturation/memory problem
+// of narrow resonators. Works correctly regardless of tone amplitude ratio
+// (immune to FM pre-emphasis amplitude effects).
+
+const (
+	centerFreq      = (markFreq + spaceFreq) / 2 // 1700 Hz
+	energyThreshold = 0.005                       // EMA power; ≈ RMS 0.07
+	lpfAlpha        = 0.1                         // IQ lowpass cutoff ~700 Hz at 44100
+	discAlpha       = 0.15                        // discriminator smoothing
+)
 
 type demodulator struct {
-	spb            float64
-	bitClock       float64
-	markI, markQ   float64
-	spaceI, spaceQ float64
-	phase          float64
-	shiftReg       uint8
-	onesCount      int
-	inFrame        bool
-	frameBuf       []byte
-	curByte        uint8
-	curBit         uint8
+	spb      float64
+	bitClock float64
+
+	// Quadrature mixer phase
+	centerPhase float64
+
+	// IQ lowpass state
+	iLP, qLP float64
+	// previous filtered IQ for discriminator
+	iPrev, qPrev float64
+	// smoothed discriminator output
+	disc float64
+	// previous disc sign for transition detection
+	prevSign int
+
+	// Clock recovery
+	energy float64 // EMA of input power
+
+	// HDLC state
+	shiftReg  uint8
+	onesCount int
+	inFrame   bool
+	frameBuf  []byte
+	curByte   uint8
+	curBit    uint8
 }
 
 func newDemodulator() *demodulator {
 	return &demodulator{spb: float64(sampleRate) / baudRate}
 }
 
-func (d *demodulator) push(samples []float32) [][]byte {
-	var frames [][]byte
-	for _, s := range samples {
-		mp := d.phase * markFreq / float64(sampleRate) * 2 * math.Pi
-		sp := d.phase * spaceFreq / float64(sampleRate) * 2 * math.Pi
-		fs := float64(s)
-		d.markI  = d.markI*0.99  + fs*math.Cos(mp)*0.01
-		d.markQ  = d.markQ*0.99  + fs*math.Sin(mp)*0.01
-		d.spaceI = d.spaceI*0.99 + fs*math.Cos(sp)*0.01
-		d.spaceQ = d.spaceQ*0.99 + fs*math.Sin(sp)*0.01
-		d.phase++
+func sign(x float64) int {
+	if x > 0 {
+		return 1
+	}
+	if x < 0 {
+		return -1
+	}
+	return 0
+}
 
-		bit := (d.markI*d.markI + d.markQ*d.markQ) > (d.spaceI*d.spaceI + d.spaceQ*d.spaceQ)
+// pushBits processes samples and returns completed HDLC frames plus every
+// raw bit decision (before HDLC state machine). Raw bits are useful for
+// diagnosing demodulator issues without framing getting in the way.
+func (d *demodulator) pushBits(samples []float32) (frames [][]byte, bits []bool) {
+	for _, s := range samples {
+		fs := float64(s)
+
+		// Energy squelch (EMA of power).
+		d.energy = d.energy*0.999 + fs*fs*0.001
+		if d.energy < energyThreshold {
+			d.resetFrame()
+			d.iLP, d.qLP = 0, 0
+			d.iPrev, d.qPrev = 0, 0
+			d.disc = 0
+			d.bitClock = 0
+			d.prevSign = 0
+			d.centerPhase = 0
+			continue
+		}
+
+		// Step 1: quadrature mix to baseband at centerFreq.
+		angle := 2 * math.Pi * d.centerPhase * centerFreq / float64(sampleRate)
+		iRaw := fs * math.Cos(angle)
+		qRaw := fs * math.Sin(angle)
+		d.centerPhase++
+
+		// Step 2: IQ lowpass filter.
+		d.iLP += lpfAlpha * (iRaw - d.iLP)
+		d.qLP += lpfAlpha * (qRaw - d.qLP)
+
+		// Step 3: FM discriminator — instantaneous frequency.
+		// Im(conj(z_prev) * z_cur) = Q_prev*I_cur - I_prev*Q_cur
+		raw := d.qPrev*d.iLP - d.iPrev*d.qLP
+		d.iPrev, d.qPrev = d.iLP, d.qLP
+
+		// Step 4: smooth discriminator output.
+		d.disc += discAlpha * (raw - d.disc)
+
+		// Step 5: bit decision.
+		// disc < 0 → mark (1200 Hz, below center) → bit true
+		// disc > 0 → space (2200 Hz, above center) → bit false
+		bit := d.disc < 0
+		sg := sign(d.disc)
+
+		// Clock recovery: disc sign change = bit transition = bit boundary.
+		if sg != 0 && sg != d.prevSign && d.prevSign != 0 {
+			// Ideal: transition at bitClock ≈ 0 (just had boundary).
+			// Error: how far we are from the nearest boundary.
+			err := d.bitClock
+			if err > d.spb/2 {
+				err -= d.spb // wrap to [-spb/2, spb/2]
+			}
+			d.bitClock -= err * 0.35
+			if d.bitClock < 0 {
+				d.bitClock += d.spb
+			}
+		}
+		d.prevSign = sg
+
+		// Sample bit at clock boundary.
 		d.bitClock++
 		if d.bitClock >= d.spb {
 			d.bitClock -= d.spb
-			if frame := d.pushBit(bit); frame != nil {
-				frames = append(frames, frame)
-			}
+			bits = append(bits, bit)
 		}
 	}
-	return frames
+	return frames, bits
+}
+
+func (d *demodulator) resetFrame() {
+	d.inFrame = false
+	if d.frameBuf != nil {
+		d.frameBuf = d.frameBuf[:0]
+	}
+	d.shiftReg = 0
+	d.curByte = 0
+	d.curBit = 0
+	d.onesCount = 0
 }
 
 func (d *demodulator) pushBit(bit bool) []byte {
@@ -313,13 +518,10 @@ func (d *demodulator) pushBit(bit bool) []byte {
 	if d.shiftReg == 0x7E {
 		if d.inFrame && len(d.frameBuf) > 2 {
 			frame := append([]byte(nil), d.frameBuf...)
-			d.frameBuf = d.frameBuf[:0]
-			d.inFrame = false
-			d.onesCount = 0
-			d.curByte = 0
-			d.curBit = 0
+			d.resetFrame()
 			return frame
 		}
+		// Flag byte = start of frame (or inter-frame fill).
 		d.inFrame = true
 		d.frameBuf = d.frameBuf[:0]
 		d.onesCount = 0
@@ -334,6 +536,7 @@ func (d *demodulator) pushBit(bit bool) []byte {
 		d.onesCount++
 	} else {
 		if d.onesCount >= 5 {
+			// Destuffed zero — drop it and continue.
 			d.onesCount = 0
 			return nil
 		}
@@ -355,7 +558,7 @@ func (d *demodulator) pushBit(bit bool) []byte {
 
 func hdlcEncode(data []byte) []bool {
 	var bits []bool
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 50; i++ { // 50 flags ≈ 333ms preamble, gives VOX time to key
 		bits = append(bits, flagBits()...)
 	}
 	var ones int
