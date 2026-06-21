@@ -24,32 +24,60 @@ const (
 	sampleRate = 44100
 )
 
-// ListAudioDevices returns names of all available audio devices.
+// AudioDeviceInfo describes an audio device with its index.
+type AudioDeviceInfo struct {
+	Index int
+	Name  string
+}
+
+// ListAudioDevices returns names of all available audio devices (deduplicated).
 func ListAudioDevices() ([]string, error) {
+	devs, err := ListAudioDevicesIndexed()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, d := range devs {
+		if !seen[d.Name] {
+			seen[d.Name] = true
+			names = append(names, d.Name)
+		}
+	}
+	return names, nil
+}
+
+// ListAudioOutputsIndexed returns all playback devices with their indices.
+func ListAudioOutputsIndexed() ([]AudioDeviceInfo, error) {
+	return listAudioIndexed(malgo.Playback)
+}
+
+// ListAudioInputsIndexed returns all capture devices with their indices.
+func ListAudioInputsIndexed() ([]AudioDeviceInfo, error) {
+	return listAudioIndexed(malgo.Capture)
+}
+
+// ListAudioDevicesIndexed returns all audio devices with indices (may have duplicate names).
+func ListAudioDevicesIndexed() ([]AudioDeviceInfo, error) {
+	return listAudioIndexed(malgo.Playback)
+}
+
+func listAudioIndexed(kind malgo.DeviceType) ([]AudioDeviceInfo, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("malgo init: %w", err)
 	}
 	defer ctx.Uninit()
 
-	devices, err := ctx.Devices(malgo.Playback)
+	devices, err := ctx.Devices(kind)
 	if err != nil {
 		return nil, err
 	}
-	captureDevices, err := ctx.Devices(malgo.Capture)
-	if err != nil {
-		return nil, err
+	result := make([]AudioDeviceInfo, len(devices))
+	for i, d := range devices {
+		result[i] = AudioDeviceInfo{Index: i, Name: d.Name()}
 	}
-	seen := map[string]bool{}
-	var names []string
-	for _, d := range append(devices, captureDevices...) {
-		name := d.Name()
-		if !seen[name] {
-			seen[name] = true
-			names = append(names, name)
-		}
-	}
-	return names, nil
+	return result, nil
 }
 
 type AudioDevice struct {

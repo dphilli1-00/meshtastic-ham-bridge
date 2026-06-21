@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os/exec"
 
 	"github.com/dphilli/meshtastic-ham-bridge/internal/types"
 )
@@ -16,10 +17,12 @@ const (
 )
 
 // DirewolfDevice connects to Direwolf via KISS over TCP.
+// If cmd is non-nil, it was launched by LaunchDirewolf and will be killed on Close.
 type DirewolfDevice struct {
 	conn net.Conn
 	recv chan []byte
 	done chan struct{}
+	cmd  *exec.Cmd // non-nil if we spawned the process
 }
 
 func ConnectDirewolf(host string, port int) (*DirewolfDevice, error) {
@@ -129,5 +132,10 @@ func (d *DirewolfDevice) Status(_ context.Context) (types.DeviceStatus, error) {
 
 func (d *DirewolfDevice) Close() error {
 	close(d.done)
-	return d.conn.Close()
+	err := d.conn.Close()
+	if d.cmd != nil {
+		d.cmd.Process.Kill()
+		d.cmd.Wait()
+	}
+	return err
 }

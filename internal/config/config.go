@@ -31,13 +31,15 @@ type MeshConfig struct {
 
 // HamConfig — type field selects which sub-config is used.
 type HamConfig struct {
-	Type        string `toml:"type"`         // "direwolf", "audio", "audio+rigctl", "ardop"
-	Host        string `toml:"host"`         // direwolf/ardop/rigctld host
-	Port        int    `toml:"port"`         // direwolf/ardop/rigctld port
-	AudioDevice string `toml:"audio_device"` // substring match; empty = default
+	Type         string `toml:"type"`          // "direwolf", "audio", "audio+rigctl", "ardop"
+	Host         string `toml:"host"`          // direwolf/ardop/rigctld host
+	Port         int    `toml:"port"`          // direwolf/ardop/rigctld port
+	AudioDevice  string `toml:"audio_device"`  // substring match; empty = default
+	DirewolfPath string `toml:"direwolf_path"` // path to direwolf binary; empty = search PATH + common locations
+	DirewolfConf string `toml:"direwolf_conf"` // path to direwolf.conf; empty = prompt interactively if TTY
 	// rigctld — used when type is "audio+rigctl"
-	RigctlHost string `toml:"rigctl_host"`  // default 127.0.0.1
-	RigctlPort int    `toml:"rigctl_port"`  // default 4532
+	RigctlHost string `toml:"rigctl_host"` // default 127.0.0.1
+	RigctlPort int    `toml:"rigctl_port"` // default 4532
 }
 
 // Load reads config using the standard search order:

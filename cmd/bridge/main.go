@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,14 +21,17 @@ import (
 
 func main() {
 	var (
-		cfgPath     = flag.String("config", "", "path to config.toml (default: platform config dir)")
-		genCfg      = flag.Bool("init-config", false, "write a template config and exit")
-		listAudio   = flag.Bool("list-audio", false, "list available audio devices and exit")
-		discover    = flag.Bool("discover", false, "list all detected serial and audio devices and exit")
-		discoverBLE = flag.Bool("discover-ble-all", false, "show ALL BLE devices (debug)")
-		testSerial  = flag.String("test-serial", "", "test serial connect to Meshtastic, e.g. COM4")
-		testBLE     = flag.String("test-ble", "", "test BLE connect to Meshtastic, e.g. C0:C2:24:70:D8:15")
-		verbose     = flag.Bool("v", false, "verbose logging")
+		cfgPath        = flag.String("config", "", "path to config.toml (default: platform config dir)")
+		genCfg         = flag.Bool("init-config", false, "write a template config and exit")
+		listAudio      = flag.Bool("list-audio", false, "list available audio devices and exit")
+		discover       = flag.Bool("discover", false, "list all detected serial and audio devices and exit")
+		discoverBLE    = flag.Bool("discover-ble-all", false, "show ALL BLE devices (debug)")
+		testSerial     = flag.String("test-serial", "", "test serial connect to Meshtastic, e.g. COM4")
+		testBLE        = flag.String("test-ble", "", "test BLE connect to Meshtastic, e.g. C0:C2:24:70:D8:15")
+		setupDirewolf  = flag.String("setup-direwolf", "", "run interactive Direwolf config wizard, write to given path (e.g. direwolf-tx.conf)")
+		testDirewolf   = flag.String("test-direwolf", "", "RF loopback test: --test-direwolf tx.conf,rx.conf")
+		testDirewolfRX = flag.Bool("rx", false, "with single --test-direwolf conf: listen only, print received frames")
+		verbose        = flag.Bool("v", false, "verbose logging")
 	)
 	flag.Parse()
 
@@ -35,6 +40,165 @@ func main() {
 		level = slog.LevelDebug
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
+	if *setupDirewolf != "" {
+		kissPort := 8001
+		if strings.Contains(*setupDirewolf, "rx") {
+			kissPort = 8002
+		}
+		if err := ham.RunDirewolfSetup(*setupDirewolf, kissPort); err != nil {
+			fmt.Fprintf(os.Stderr, "setup failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *testDirewolf != "" {
+		parts := strings.SplitN(*testDirewolf, ",", 2)
+
+		payload := []byte("direwolf-loopback-test")
+		frame := []byte{
+			0x82, 0xA0, 0xA4, 0xA6, 0x40, 0x40, 0x00, // dst: APRS
+			0xA8, 0x8A, 0x9C, 0xA8, 0x40, 0x40, 0x02, // src: TEST-1
+			0x03, 0xF0, // control + PID
+		}
+		frame = append(frame, payload...)
+
+		ham.KillAllDirewolf()
+
+		// Single config: TX loop or RX listen.
+		if len(parts) == 1 {
+			conf := strings.TrimSpace(parts[0])
+			kissPort, err := ham.ReadKISSPort(conf)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "reading config: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Launching Direwolf with %s...\n", conf)
+			dev, err := ham.LaunchDirewolf(conf, kissPort)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "direwolf failed: %v\n", err)
+				os.Exit(1)
+			}
+			defer dev.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			go func() { <-sig; cancel() }()
+
+			if *testDirewolfRX {
+				fmt.Println("Listening for frames. Ctrl-C to stop.")
+				for {
+					f, err := dev.RecvFrame(ctx)
+					if err != nil {
+						if ctx.Err() != nil {
+							return
+						}
+						fmt.Fprintf(os.Stderr, "recv: %v\n", err)
+						return
+					}
+					fmt.Printf("RX (%d bytes): % X\n", len(f), f)
+					if len(f) > 16 {
+						fmt.Printf("  info: %q\n", f[16:])
+					}
+				}
+			}
+
+			fmt.Println("Sending frame every second. Ctrl-C to stop.")
+			for {
+				if err := dev.SendFrame(ctx, frame); err != nil {
+					fmt.Fprintf(os.Stderr, "send: %v\n", err)
+					break
+				}
+				fmt.Printf("TX: % X\n", frame)
+				select {
+				case <-time.After(time.Second):
+				case <-ctx.Done():
+					return
+				}
+			}
+			return
+		}
+
+		// Two configs: loopback assert.
+		// Always launch the lower-port config first. Direwolf 1.8.1 always
+		// attempts to bind 8001 as a default; if the higher-port instance
+		// launches first it steals 8001 and the lower-port instance can't start.
+		confA, confB := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		portA, err := ham.ReadKISSPort(confA)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "reading config: %v\n", err)
+			os.Exit(1)
+		}
+		portB, err := ham.ReadKISSPort(confB)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "reading config: %v\n", err)
+			os.Exit(1)
+		}
+		if portA == portB {
+			fmt.Fprintf(os.Stderr, "both configs use port %d — they must use different KISSPORT values\n", portA)
+			os.Exit(1)
+		}
+
+		txConf, txPort, rxConf, rxPort := confA, portA, confB, portB
+		if portA > portB {
+			txConf, txPort, rxConf, rxPort = confB, portB, confA, portA
+		}
+
+		fmt.Println("Launching TX Direwolf...")
+		tx, err := ham.LaunchDirewolf(txConf, txPort)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "TX direwolf failed: %v\n", err)
+			os.Exit(1)
+		}
+		defer tx.Close()
+
+		fmt.Println("Launching RX Direwolf...")
+		rx, err := ham.LaunchDirewolf(rxConf, rxPort)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "RX direwolf failed: %v\n", err)
+			os.Exit(1)
+		}
+		defer rx.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		go func() { <-sig; cancel() }()
+
+		// Print received frames as they arrive.
+		go func() {
+			for {
+				f, err := rx.RecvFrame(ctx)
+				if err != nil {
+					return
+				}
+				if bytes.Contains(f, payload) {
+					fmt.Printf("PASS — RX matched (%d bytes): % X\n", len(f), f)
+				} else {
+					fmt.Printf("RX (%d bytes, no match): % X\n", len(f), f)
+				}
+			}
+		}()
+
+		fmt.Println("Sending frame every second. Ctrl-C to stop.")
+		for {
+			if err := tx.SendFrame(ctx, frame); err != nil {
+				fmt.Fprintf(os.Stderr, "send: %v\n", err)
+				break
+			}
+			fmt.Printf("TX: % X\n", frame)
+			select {
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+				return
+			}
+		}
+		return
+	}
 
 	if *testSerial != "" {
 		testMeshConnect("serial:"+*testSerial, func() (mesh.Device, error) {
@@ -90,8 +254,6 @@ func main() {
 				name := d.Name
 				hint := ""
 				if name == "" {
-					// Already-paired devices don't advertise name on Windows.
-					// Show MAC suffix as a hint — matches Meshtastic node name format.
 					hint = fmt.Sprintf("  (paired? suffix=%s)", discovery.MeshtasticMACToName(d.Address))
 				}
 				kind := ""
@@ -183,7 +345,6 @@ func main() {
 func buildMesh(cfg config.MeshConfig) (mesh.Device, error) {
 	switch cfg.Type {
 	case "meshtastic":
-		// BLE address takes priority over serial
 		if cfg.BLEAddress != "" {
 			slog.Info("connecting Meshtastic via BLE", "addr", cfg.BLEAddress)
 			return mesh.ConnectMeshtasticBLE(cfg.BLEAddress)
@@ -231,7 +392,6 @@ func buildHam(cfg config.HamConfig) (ham.Device, error) {
 	case "audio":
 		return ham.NewAudio(cfg.AudioDevice)
 	case "audio+rigctl":
-		// Audio modem for data, rigctld for PTT/CAT control (e.g. IC-705)
 		audio, err := ham.NewAudio(cfg.AudioDevice)
 		if err != nil {
 			return nil, fmt.Errorf("audio: %w", err)
@@ -252,8 +412,6 @@ func testMeshConnect(label string, connect func() (mesh.Device, error)) {
 	}
 	defer dev.Close()
 	fmt.Printf("OK — connected as %s\n", dev.DeviceType())
-	// Send WantConfigId to trigger the node to stream its config over FromRadio.
-	// ToRadio.want_config_id = field 3, varint: tag=0x18, value=42 (0x2a)
 	wantConfig := []byte{0x18, 0x2a}
 	if err := dev.SendPacket(context.Background(), wantConfig); err != nil {
 		fmt.Printf("send WantConfigId failed: %v\n", err)
@@ -270,7 +428,7 @@ func testMeshConnect(label string, connect func() (mesh.Device, error)) {
 		pkt, err := dev.RecvPacket(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				break // timeout — normal exit
+				break
 			}
 			fmt.Printf("recv error: %v\n", err)
 			break

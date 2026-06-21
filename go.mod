@@ -1,6 +1,6 @@
 module github.com/dphilli/meshtastic-ham-bridge
 
-go 1.22
+go 1.25.0
 
 require (
 	github.com/BurntSushi/toml v1.3.2
@@ -16,5 +16,6 @@ require (
 	github.com/saltosystems/winrt-go v0.0.0-20240320113951-a2e4fc03f5f4 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/tinygo-org/cbgo v0.0.4 // indirect
-	golang.org/x/sys v0.17.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/term v0.44.0 // indirect
 )
